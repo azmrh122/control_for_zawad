@@ -4,6 +4,14 @@ import pandas as pd
 from scipy.signal import find_peaks
 from IPython.display import display
 
+def smooth_param(t, rest_val, ex_val, t_mid_up, t_mid_down, k):
+    """Sigmoid-blended parameter between rest and exercise phases."""
+    alpha_up   = 1.0 / (1.0 + math.exp(-k * (t - t_mid_up)))
+    alpha_down = 1.0 / (1.0 + math.exp(-k * (t - t_mid_down)))
+    blend = alpha_up - alpha_down          # 0 → 1 → 0 over the exercise window
+    return rest_val + (ex_val - rest_val) * blend
+
+
 def target(x1: float, y1: float, CL: np.ndarray, Plved_grid: np.ndarray, SF: float = 1.0):
     """Immediate Starling-like target."""
     ControlLine = CL * SF if SF != 1.0 else CL
@@ -238,6 +246,44 @@ class CardioModel:
         # -----------------------
         # Time-stepping simulation
         # -----------------------
+        # ── Sigmoid transition settings ──────────────────────────────────────────────
+        t_mid_up   = t_max * 0.42   # centre of rest→exercise ramp  (tune as needed)
+        t_mid_down = t_max * 0.68   # centre of exercise→rest ramp
+        k_sigmoid  = 0.15           # steepness (higher = sharper; lower = smoother)
+
+        # ── Rest values (healthy) ────────────────────────────────────────────────────
+        rest_h = dict(
+            R_svr0=0.62, E_lv_max0=1.8, E_rv_max0=0.6, T0=0.58,
+            E_ra_max=0.25, E_la_max=0.25, R_pvr=0.12,
+            C_sv=20.5, V0_sv=2500.0, V0_pv=150.0,
+            R_sv=0.023, R_pv=0.011, R_MV=0.005, E_lv_min=0.04,
+            target_MAP=86.0
+        )
+        # ── Exercise values (healthy) ────────────────────────────────────────────────
+        ex_h = dict(
+            R_svr0=0.62*0.5, E_lv_max0=1.8*2.0, E_rv_max0=0.6*2.0, T0=0.58*0.7,
+            E_ra_max=0.25*1.5, E_la_max=0.25*1.5, R_pvr=0.12*0.7,
+            C_sv=20.5*0.8, V0_sv=2500*0.85, V0_pv=150*0.8,
+            R_sv=0.023*0.8, R_pv=0.011, R_MV=0.005, E_lv_min=0.11,
+            target_MAP=100.0
+        )
+
+        # ── Rest values (LV failure) ─────────────────────────────────────────────────
+        rest_f = dict(
+            R_svr0=0.71, E_lv_max0=0.05, E_rv_max0=0.6, T0=0.52,
+            E_ra_max=0.25, E_la_max=0.25, R_pvr=0.14,
+            C_sv=20.5, V0_sv=2500.0, V0_pv=150.0,
+            R_sv=0.023, R_pv=0.011, R_MV=0.005, E_lv_min=0.04,
+            target_MAP=85.0
+        )
+        # ── Exercise values (LV failure) ─────────────────────────────────────────────
+        ex_f = dict(
+            R_svr0=0.71*0.6, E_lv_max0=0.05*1.5, E_rv_max0=0.6*1.5, T0=0.52*0.7,
+            E_ra_max=0.25*1.5, E_la_max=0.25*1.5, R_pvr=0.14*0.8,
+            C_sv=20.5*0.8, V0_sv=2500*0.85, V0_pv=150*0.8,
+            R_sv=0.023*0.8, R_pv=0.011, R_MV=0.005, E_lv_min=0.11,
+            target_MAP=95.0
+        )
         for step in range(steps):
             # Update cycle time
             t_cycle += dt
@@ -342,86 +388,37 @@ class CardioModel:
 
             # Exercise conditions
             # Exercise conditions
-            if step > steps * 0.4 and step < steps * 0.7 and self.patient_condition == 'healthy' and self.exercise == 'yes':
-                R_svr0 =   0.62 * 0.5    # Good: Vasodilation in exercising muscle
-                E_lv_max0 = 1.8 * 2.0    # Good: Increased contractility
-                E_rv_max0 = 0.6 * 2.0
-                T0 =        0.58 * 0.7   # Good: HR increase
-                E_ra_max = 0.25 * 1.5    # Dialed back slightly
-                E_la_max = 0.25 * 1.5
-                R_pvr =    0.12 * 0.7    # Less aggressive pulmonary dilation
+            # ── Smooth exercise transition ────────────────────────────────────────────────
+            if self.exercise == 'yes':
+                t_now = step * dt
 
-                # --- TUNED PARAMETERS TO STABILIZE VOLUME ---
-                C_sv =     20.5 * 0.8    # Stiffen veins by 20% instead of 50%
-                V0_sv =    2500 * 0.85   # Shift ~375 mL instead of 750 mL
-                V0_pv =    150 * 0.8     # Milder pulmonary shift
-                R_sv =     0.023 * 0.8   # Muscle pump effect (20% reduction)
-                R_pv =     0.011         # Keep pulmonary return resistance baseline
-                R_MV =     0.005         # Keep valve resistance baseline!
-                E_lv_min = 0.11
-                # ----------------------------------------
+                if self.patient_condition == 'healthy':
+                    rv, ev = rest_h, ex_h
+                else:  # lv_failure
+                    rv, ev = rest_f, ex_f
 
-                target_MAP = 100
+                def sp(key):
+                    return smooth_param(t_now, rv[key], ev[key], t_mid_up, t_mid_down, k_sigmoid)
 
-            elif step > steps * 0.7 and self.patient_condition == 'healthy' and self.exercise == 'yes':
-                # Rest 2 / Recovery Phase
-                R_svr0 =   0.62
-                E_lv_max0 = 1.8
-                E_rv_max0 = 0.6
-                T0 =        0.58
-                E_ra_max = 0.25
-                E_la_max = 0.25
-                R_pvr =    0.12
-                C_sv =     20.5
-                V0_sv =    2500
+                R_svr0    = sp('R_svr0')
+                E_lv_max0 = sp('E_lv_max0')
+                E_rv_max0 = sp('E_rv_max0')
+                T0        = sp('T0')
+                E_ra_max  = sp('E_ra_max')
+                E_la_max  = sp('E_la_max')
+                R_pvr     = sp('R_pvr')
+                C_sv      = sp('C_sv')
+                V0_sv     = sp('V0_sv')
+                V0_pv     = sp('V0_pv')
+                R_sv      = sp('R_sv')
+                R_pv      = sp('R_pv')
+                R_MV      = sp('R_MV')
+                E_lv_min  = sp('E_lv_min')
+                target_MAP = sp('target_MAP')
+# ─────────────────────────────────────────────────────────────────────────────
+            
+  
 
-                # --- RESET NEW PARAMETERS ---
-                V0_pv =    150
-                R_sv =     0.023
-                R_pv =     0.011
-                R_MV =     0.005
-                E_lv_min = 0.04
-                # ----------------------------
-
-                target_MAP = 85
-
-            elif step > steps * 0.4 and step < steps * 0.7 and self.patient_condition == 'lv_failure' and self.exercise == 'yes':
-                R_svr0 =   0.71 * 0.6    # Failing hearts vasodilate less effectively
-                E_lv_max0 = 0.05 * 1.5   # Diminished contractile reserve
-                E_rv_max0 = 0.6 * 1.5
-                T0 =        0.52 * 0.7
-                E_ra_max = 0.25 * 1.5
-                E_la_max = 0.25 * 1.5
-                R_pvr =    0.14 * 0.8
-
-                # --- TUNED PARAMETERS ---
-                C_sv =     20.5 * 0.8
-                V0_sv=     2500 * 0.85
-                V0_pv =    150 * 0.8
-                R_sv =     0.023 * 0.8
-                R_pv =     0.011
-                R_MV =     0.005
-                E_lv_min = 0.11
-
-                target_MAP = 95 #for heart failure ,target MAP should be lower
-            elif step > steps * 0.7 and self.patient_condition == 'lv_failure' and self.exercise == 'yes':
-                E_lv_max0 = 0.05
-                R_svr0 =   0.71
-                T0 =        0.52
-                R_pvr =    0.14
-                E_rv_max0 = 0.6
-                E_ra_max = 0.25
-                E_la_max = 0.25
-                C_sv =     20.5
-                V0_sv =    2500
-                E_lv_min = 0.04
-
-                V0_pv =    150
-                R_sv =     0.023
-                R_pv =     0.011
-                R_MV =     0.005
-
-                target_MAP = 85
 
             t_n = t_cycle / (0.2 + 0.15 * T)
             E_n = 1.55 * ((t_n / 0.7) ** 1.9 / (1 + (t_n / 0.7) ** 1.9)) * (1 / (1 + (t_n / 1.17) ** 21.9))
@@ -603,7 +600,17 @@ class CardioModel:
         self.PI_ao_list = PI_ao_list
         self.PI_irp_list = PI_irp_list
         # # Extract Left Ventricular Volume (Vlv) and Pressure (PLV) using numpy
+        # vlv_data_full = np.array([v[0] for v in self.volumes])
+        # plv_data_full = np.array([p[0] for p in self.pressures])
 
+        # # 0.15 seconds ensures we don't skip peaks even at max simulated heart rate
+        # safe_distance = 5000
+
+        # peaks, _ = find_peaks(vlv_data_full, distance=safe_distance)
+
+        # # Extract LVEDV and LVEDP values and save them as class attributes
+        # self.LVEDV = vlv_data_full[peaks].tolist()
+        # self.LVEDP = plv_data_full[peaks].tolist()
 
 
     # ---------------------------------------------------------
